@@ -1,0 +1,2 @@
+-- Add migration script here
+ALTER TABLE cards ADD COLUMN image_url TEXT;

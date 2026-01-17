@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT cards.name as name, id_in_set, rarities.name as rarity, types.name as buster_slot, sets.short_name as set_name, image_url\n            FROM cards\n            INNER JOIN rarities ON cards.rarity_id = rarities.id\n            INNER JOIN types ON cards.type_id = types.id\n            INNER JOIN sets ON cards.set_id = sets.id\n            WHERE set_id = (SELECT id from sets WHERE short_name = ?)",
+  "describe": {
+    "columns": [
+      {
+        "name": "name",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "id_in_set",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "rarity",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "buster_slot",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "set_name",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "image_url",
+        "ordinal": 5,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "c1d112fb2384fe58fd35ea1c40ee1d54980f8b3212a6329b20b9831dadd6e36f"
+}
