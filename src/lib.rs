@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, fmt::Display};
 
 use rand::{Rng, seq::IndexedRandom};
 use sqlx::SqlitePool;
@@ -6,13 +6,19 @@ use sqlx::SqlitePool;
 const BUSTER_SIZE: usize = 18;
 
 #[derive(Debug, Clone)]
-struct Card {
-    name: String,
-    id_in_set: u32,
-    rarity: CardRarity,
-    buster_slot: CardBusterSlot,
-    set: CardSet,
-    image_url: Option<String>,
+pub struct Card {
+    pub name: String,
+    pub id_in_set: u32,
+    pub rarity: CardRarity,
+    pub buster_slot: CardBusterSlot,
+    pub set: CardSet,
+    pub image_url: Option<String>,
+}
+
+impl Display for Card {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:30} {:3} {:9} {:7} {:15}", self.name, self.id_in_set, self.set, self.rarity, self.buster_slot)
+    }
 }
 
 impl Card {
@@ -41,19 +47,26 @@ impl Card {
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
-enum CardRarity {
+pub enum CardRarity {
     Bronze,
     Silver,
     Gold,
 }
 
-impl CardRarity {
-    fn as_str(&self) -> &str {
-        match self {
+impl Display for CardRarity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
             CardRarity::Bronze => "Бронза",
             CardRarity::Silver => "Серебро",
             CardRarity::Gold => "Золото",
-        }
+        };
+        f.pad(&s)
+    }
+}
+
+impl CardRarity {
+    fn iter() -> impl Iterator<Item = CardRarity> {
+        [CardRarity::Bronze, CardRarity::Silver, CardRarity::Gold].into_iter()
     }
 }
 
@@ -71,21 +84,24 @@ impl TryFrom<String> for CardRarity {
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
-enum CardBusterSlot {
+pub enum CardBusterSlot {
     Hero,
     Command,
     BasicCard,
 }
 
-impl CardBusterSlot {
-    fn as_str(&self) -> &str {
-        match self {
+impl Display for CardBusterSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+       let s = match self {
             CardBusterSlot::Hero => "Герой",
             CardBusterSlot::Command => "Приказ",
             CardBusterSlot::BasicCard => "Основная карта",
-        }
+        };
+        f.pad(&s) 
     }
+}
 
+impl CardBusterSlot {
     fn iter() -> impl Iterator<Item = CardBusterSlot> {
         [CardBusterSlot::Hero, CardBusterSlot::Command, CardBusterSlot::BasicCard].into_iter()
     }
@@ -105,19 +121,20 @@ impl TryFrom<String> for CardBusterSlot {
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
-enum CardSet {
+pub enum CardSet {
     BAZ,
     KOV,
     HallOfFame,
 }
 
-impl CardSet {
-    fn as_str(&self) -> &str {
-        match self {
+impl Display for CardSet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
             CardSet::BAZ => "БАЗ",
             CardSet::KOV => "КОВ",
             CardSet::HallOfFame => "Зал Славы",
-        }
+        };
+        f.pad(&s)
     }
 }
 
@@ -135,32 +152,38 @@ impl TryFrom<String> for CardSet {
 }
 
 #[derive(Debug)]
-struct CardBase {
-    cards: HashMap<(CardBusterSlot, CardSet), Vec<Card>>,
+pub struct CardBase {
+    cards: HashMap<(CardBusterSlot, CardSet, CardRarity), Vec<Card>>,
+    sets: Vec<CardSet>,
     db_pull: SqlitePool,
     rng: rand::rngs::ThreadRng,
 }
 
 impl CardBase {
-    async fn new(db_pull: SqlitePool) -> Self {
+    pub async fn new(db_pull: SqlitePool) -> Self {
         let rng = rand::rng();
         let mut new_card_base = CardBase {
             cards: HashMap::new(),
+            sets: vec![CardSet::HallOfFame],
             db_pull: db_pull,
             rng,
         };
-        new_card_base.add_set(CardSet::HallOfFame).await;
+        new_card_base.add_set(CardSet::HallOfFame).await.unwrap();
         new_card_base
     }
 
     fn has_set(&self, set: CardSet) -> bool {
-        CardBusterSlot::iter().any(|slot| self.cards.contains_key(&(slot, set)))
+        self.sets.contains(&set)
     }
 
     async fn add_set(&mut self, set: CardSet) -> Result<(), Box<dyn std::error::Error>>{
-        CardBusterSlot::iter().for_each(|slot| { self.cards.insert((slot, set), Vec::new()); } );
+        CardBusterSlot::iter().for_each(|slot| { 
+            CardRarity::iter().for_each(|rarity| {
+                self.cards.insert((slot, set, rarity), Vec::new());
+            } )
+        } );
             
-        let set_str = set.as_str();
+        let set_str = set.to_string();
         sqlx::query!(
             "SELECT cards.name as name, id_in_set, rarities.name as rarity, types.name as buster_slot, sets.short_name as set_name, image_url
             FROM cards
@@ -179,26 +202,31 @@ impl CardBase {
                 Ok(Card::new(rec.name, u32::try_from(rec.id_in_set)?, rarity, buster_slot, set, rec.image_url))
             })
             .collect::<Result<Vec<Card>, Box<dyn std::error::Error>>>()?
-            .into_iter().for_each(|c| self.cards.get_mut(&(c.buster_slot, set)).unwrap().push(c.clone()));
-
+            .into_iter().for_each(|c| self.cards.get_mut(&(c.buster_slot, set, c.rarity)).unwrap().push(c.clone()));
+        
+        self.sets.push(set);
         Ok(())
     }
 
     async fn generate_card(&mut self, slot: CardBusterSlot, rarity: CardRarity, set: CardSet, hall_of_fame: bool) -> Option<Card> {
+        if !self.has_set(set) {
+            self.add_set(set).await.ok()?;
+        }
+
         if hall_of_fame {
-            if let Some(card) = self.cards[&(slot, CardSet::HallOfFame)].choose(&mut self.rng) {
+            if let Some(card) = self.cards[&(slot, CardSet::HallOfFame, rarity)].choose(&mut self.rng) {
                 Some(card.clone())
             } else {
-                Some(self.cards[&(slot, set)].choose(&mut self.rng)?.clone())
+                Some(self.cards[&(slot, set, rarity)].choose(&mut self.rng)?.clone())
             }
         } else {
-            Some(self.cards[&(slot, set)].choose(&mut self.rng)?.clone())
+            Some(self.cards[&(slot, set, rarity)].choose(&mut self.rng)?.clone())
         }
     }
 
-    async fn generate_buster(&mut self, rules: &BusterRules) -> Option<[Card; BUSTER_SIZE]> {
+    pub async fn generate_buster(&mut self, rules: &BusterRules) -> Option<[Card; BUSTER_SIZE]> {
         if !self.has_set(rules.set) {
-            self.add_set(rules.set).await;
+            self.add_set(rules.set).await.ok()?;
         }
 
         let mut buster = std::array::from_fn(|_| Card::plug());
@@ -220,10 +248,10 @@ impl CardBase {
         };
         buster[1] = self.generate_card(CardBusterSlot::Command, command_rarity, rules.set, rules.generate_hall_of_fame()).await?;
 
-        // Приказ серебро/золото
+        // Приказ бронза/серебро
         let command_rarity = match rules.command_chanse_bronze_silver.generate() {
-            0 => CardRarity::Silver,
-            1 => CardRarity::Gold,
+            0 => CardRarity::Bronze,
+            1 => CardRarity::Silver,
             _ => unreachable!(),
         };
         buster[2] = self.generate_card(CardBusterSlot::Command, command_rarity, rules.set, rules.generate_hall_of_fame()).await?;
@@ -244,9 +272,11 @@ impl CardBase {
 
         // Основная карта серебро
         buster[6] = self.generate_card(CardBusterSlot::BasicCard, CardRarity::Silver, rules.set, rules.generate_hall_of_fame()).await?;
+        buster[7] = self.generate_card(CardBusterSlot::BasicCard, CardRarity::Silver, rules.set, rules.generate_hall_of_fame()).await?;
+        buster[8] = self.generate_card(CardBusterSlot::BasicCard, CardRarity::Silver, rules.set, rules.generate_hall_of_fame()).await?;
 
         // Основные карты бронза
-        for i in 7..BUSTER_SIZE {
+        for i in 9..BUSTER_SIZE {
             buster[i] = self.generate_card(CardBusterSlot::BasicCard, CardRarity::Bronze, rules.set, rules.generate_hall_of_fame()).await?;
         }   
 
@@ -255,7 +285,7 @@ impl CardBase {
 }
 
 #[derive(Debug)]
-struct BusterRules {
+pub struct BusterRules {
     set: CardSet,
     hall_of_fame_chanse: f64,
     hero_chanse: Distribution<2>,
@@ -265,7 +295,7 @@ struct BusterRules {
 }
 
 impl BusterRules {
-    fn new(
+    pub fn new(
         set: CardSet,
         hall_of_fame_chanse: f64,
         hero_chanse: Distribution<2>,
@@ -293,12 +323,12 @@ impl BusterRules {
 }
 
 #[derive(Debug)]
-struct Distribution<const SIZE: usize> {
+pub struct Distribution<const SIZE: usize> {
     values: [f64; SIZE],
 }
 
 impl<const SIZE: usize> Distribution<SIZE> {
-    fn new(values: [f64; SIZE]) -> Result<Distribution<SIZE>, Box<dyn std::error::Error>> {
+    pub fn new(values: [f64; SIZE]) -> Result<Distribution<SIZE>, Box<dyn std::error::Error>> {
         if values.iter().any(|&v| v < 0.0 || v > 1.0) {
             return Err("Distribution values must be between 0.0 and 1.0".into());
         }
@@ -331,10 +361,11 @@ impl<const SIZE: usize> Distribution<SIZE> {
 
 #[cfg(test)]
 mod tests {
+    use tokio::test; 
     use super::*;
 
     #[test]
-    fn create_distribution_when_valid_values_then_ok1() {
+    async fn create_distribution_when_valid_values_then_ok1() {
         // GIVEN
         let my_distribution = [0.2, 0.5, 0.3];
         // WHEN
@@ -344,7 +375,7 @@ mod tests {
     }
 
     #[test]
-    fn create_distribution_when_valid_values_then_ok2() {
+    async fn create_distribution_when_valid_values_then_ok2() {
         // GIVEN
         let my_distribution = [1.0, 0.0, 0.0, 0.0];
         // WHEN
@@ -354,7 +385,7 @@ mod tests {
     }
 
     #[test]
-    fn create_distribution_when_valid_values_then_ok3() {
+    async fn create_distribution_when_valid_values_then_ok3() {
         // GIVEN
         let my_distribution = [0.001, 0.999];
         // WHEN
@@ -364,7 +395,7 @@ mod tests {
     }
 
     #[test]
-    fn create_distribution_when_wrong_sum_then_err1() {
+    async fn create_distribution_when_wrong_sum_then_err1() {
         // GIVEN
         let my_distribution = [0.5, 0.5, 0.5, 0.5];
         // WHEN
@@ -374,7 +405,7 @@ mod tests {
     }
 
     #[test]
-    fn create_distribution_when_wrong_sum_then_err2() {
+    async fn create_distribution_when_wrong_sum_then_err2() {
         // GIVEN
         let my_distribution = [0.2, 0.1, 0.2, 0.1];
         // WHEN
@@ -384,7 +415,7 @@ mod tests {
     }
 
     #[test]
-    fn create_distribution_when_wrong_element_then_err1() {
+    async fn create_distribution_when_wrong_element_then_err1() {
         // GIVEN
         let my_distribution = [0.2, 20.0, 0.2, 0.1];
         // WHEN
@@ -394,7 +425,7 @@ mod tests {
     }
 
     #[test]
-    fn create_distribution_when_wrong_element_then_err2() {
+    async fn create_distribution_when_wrong_element_then_err2() {
         // GIVEN
         let my_distribution = [0.1, 0.2, 0.3, -0.4];
         // WHEN
@@ -404,7 +435,7 @@ mod tests {
     }
 
     #[test]
-    fn get_values_when_valid_values_then_ok() {
+    async fn get_values_when_valid_values_then_ok() {
         // GIVEN
         let my_distribution = [0.1, 0.2, 0.3, 0.4];
         // WHEN
@@ -415,7 +446,7 @@ mod tests {
     }
 
     #[test]
-    fn generate_with_guaranteed_distribution1() {
+    async fn generate_with_guaranteed_distribution1() {
         // GIVEN
         let my_distribution = [1.0, 0.0, 0.0, 0.0, 0.0];
         // WHEN
@@ -427,7 +458,7 @@ mod tests {
     }
 
     #[test]
-    fn generate_with_guaranteed_distribution2() {
+    async fn generate_with_guaranteed_distribution2() {
         // GIVEN
         let my_distribution = [0.0, 0.0, 1.0, 0.0, 0.0];
         // WHEN
@@ -439,7 +470,7 @@ mod tests {
     }
 
     #[test]
-    fn generate_with_guaranteed_distribution3() {
+    async fn generate_with_guaranteed_distribution3() {
         // GIVEN
         let my_distribution = [0.0, 0.0, 0.0, 0.0, 1.0];
         // WHEN
@@ -451,7 +482,7 @@ mod tests {
     }
 
     #[test]
-    fn generate_with_random_distribution() {
+    async fn generate_with_random_distribution() {
         // GIVEN
         let my_distribution = [0.2, 0.2, 0.2, 0.2, 0.2];
         // WHEN
@@ -463,7 +494,7 @@ mod tests {
     }
 
     #[test]
-    fn create_buster_rules_with_valid_values() {
+    async fn create_buster_rules_with_valid_values() {
         // GIVEN
         let hall_of_fame_chanse = 0.1;
         let my_distribution2 = [0.2, 0.8];
@@ -487,7 +518,7 @@ mod tests {
     }
 
     #[test]
-    fn create_buster_rules_with_invalid_hall_of_fame_chanse1() {
+    async fn create_buster_rules_with_invalid_hall_of_fame_chanse1() {
         // GIVEN
         let hall_of_fame_chanse = 1.001;
         let my_distribution2 = [0.2, 0.8];
@@ -511,7 +542,7 @@ mod tests {
     }
 
     #[test]
-    fn create_buster_rules_with_invalid_hall_of_fame_chanse2() {
+    async fn create_buster_rules_with_invalid_hall_of_fame_chanse2() {
         // GIVEN
         let hall_of_fame_chanse = -0.1;
         let my_distribution2 = [0.2, 0.8];
@@ -535,15 +566,15 @@ mod tests {
     }
 
     #[test]
-    fn generate_buster_check_hero() {
-        let buster = standart_buster_when_given();
+    async fn generate_buster_check_hero() {
+        let buster = standart_buster_when_given().await;
         // THEN
         assert_eq!(buster[0].buster_slot, CardBusterSlot::Hero);
     }
 
     #[test]
-    fn generate_buster_check_commands() {
-        let buster = standart_buster_when_given();
+    async fn generate_buster_check_commands() {
+        let buster = standart_buster_when_given().await;
         // THEN
         for i in 1..=3 {
             assert_eq!(buster[i].buster_slot, CardBusterSlot::Command);
@@ -551,8 +582,8 @@ mod tests {
     }
 
     #[test]
-    fn generate_buster_check_basic_cards() {
-        let buster = standart_buster_when_given();
+    async fn generate_buster_check_basic_cards() {
+        let buster = standart_buster_when_given().await;
         // THEN
         for i in 4..BUSTER_SIZE {
             assert_eq!(buster[i].buster_slot, CardBusterSlot::BasicCard);
@@ -560,22 +591,24 @@ mod tests {
     }
 
     #[test]
-    fn generate_buster_check_guaranteed_rarities() {
-        let buster = standart_buster_when_given();
+    async fn generate_buster_check_guaranteed_rarities() {
+        let buster = standart_buster_when_given().await;
         // THEN
         assert_ne!(buster[0].rarity, CardRarity::Bronze);
-        assert_eq!(buster[2].rarity, CardRarity::Gold);
+        assert_ne!(buster[2].rarity, CardRarity::Gold);
         assert_eq!(buster[3].rarity, CardRarity::Bronze);
         assert_eq!(buster[4].rarity, CardRarity::Gold);
         assert_ne!(buster[5].rarity, CardRarity::Bronze);
         assert_eq!(buster[6].rarity, CardRarity::Silver);
-        for i in 7..BUSTER_SIZE {
+        assert_eq!(buster[7].rarity, CardRarity::Silver);
+        assert_eq!(buster[8].rarity, CardRarity::Silver);
+        for i in 9..BUSTER_SIZE {
             assert_eq!(buster[i].rarity, CardRarity::Bronze);
         }   
     }
 
     #[test]
-    fn generate_buster_check_random_rarities_with_1_chanse() {
+    async fn generate_buster_check_random_rarities_with_1_chanse() {
         // GIVEN
         let hall_of_fame_chanse = 0.5;
         let my_distribution2 = [0.0, 1.0];
@@ -594,8 +627,11 @@ mod tests {
             command_chanse3,
             basic_card_chanse,
         ).unwrap();
-        let buster = rules.generate_buster().unwrap();
+        let db_pull = SqlitePool::connect(&std::env::var("DATABASE_URL").unwrap()).await.unwrap();
+        let mut card_base = CardBase::new(db_pull).await;
+        let buster = card_base.generate_buster(&rules).await.unwrap();
         // THEN
+        buster.iter().for_each(|c| println!("{:?} {:?}", c.buster_slot, c.rarity));
         assert_eq!(buster[0].rarity, CardRarity::Gold);
         assert_eq!(buster[1].rarity, CardRarity::Gold);
         assert_eq!(buster[2].rarity, CardRarity::Silver);
@@ -603,7 +639,7 @@ mod tests {
     }
 
     #[test]
-    fn generate_buster_check_random_rarities_with_0_chanse() {
+    async fn generate_buster_check_random_rarities_with_0_chanse() {
         // GIVEN
         let hall_of_fame_chanse = 0.5;
         let my_distribution2 = [1.0, 0.0];
@@ -622,7 +658,9 @@ mod tests {
             command_chanse3,
             basic_card_chanse,
         ).unwrap();
-        let buster = rules.generate_buster().unwrap();
+        let db_pull = SqlitePool::connect(&std::env::var("DATABASE_URL").unwrap()).await.unwrap();
+        let mut card_base = CardBase::new(db_pull).await;
+        let buster = card_base.generate_buster(&rules).await.unwrap();
         // THEN
         assert_eq!(buster[0].rarity, CardRarity::Silver);
         assert_eq!(buster[1].rarity, CardRarity::Bronze);
@@ -631,7 +669,7 @@ mod tests {
     }
 
     #[test]
-    fn generate_buster_check_hall_of_fame_with_1_chanse() {
+    async fn generate_buster_check_hall_of_fame_with_1_chanse() {
         // GIVEN
         let hall_of_fame_chanse = 1.0;
         let my_distribution2 = [0.0, 1.0];
@@ -650,7 +688,9 @@ mod tests {
             command_chanse3,
             basic_card_chanse,
         ).unwrap();
-        let buster = rules.generate_buster().unwrap();
+        let db_pull = SqlitePool::connect(&std::env::var("DATABASE_URL").unwrap()).await.unwrap();
+        let mut card_base = CardBase::new(db_pull).await;
+        let buster = card_base.generate_buster(&rules).await.unwrap();
         // THEN
         assert_eq!(buster[0].set, CardSet::HallOfFame);
         assert_eq!(buster[4].set, CardSet::HallOfFame);
@@ -658,7 +698,7 @@ mod tests {
     }
 
     #[test]
-    fn generate_buster_check_no_hall_of_fame_with_0_chanse() {
+    async fn generate_buster_check_no_hall_of_fame_with_0_chanse() {
         // GIVEN
         let hall_of_fame_chanse = 0.0;
         let my_distribution2 = [0.5, 0.5];
@@ -677,7 +717,9 @@ mod tests {
             command_chanse3,
             basic_card_chanse,
         ).unwrap();
-        let buster = rules.generate_buster().unwrap();
+        let db_pull = SqlitePool::connect(&std::env::var("DATABASE_URL").unwrap()).await.unwrap();
+        let mut card_base = CardBase::new(db_pull).await;
+        let buster = card_base.generate_buster(&rules).await.unwrap();
         // THEN
         for card in buster.iter() {
             assert_ne!(card.set, CardSet::HallOfFame);
@@ -685,27 +727,31 @@ mod tests {
     }
 
     #[test]
-    fn generate_card_with_valid_values() {
+    async fn generate_card_with_valid_values() {
         // GIVEN
         let slot = CardBusterSlot::Hero;
         let rarity = CardRarity::Silver;
         let set = CardSet::KOV;
         let hall_of_fame = false;
         // WHEN
-        let card = generate_card(slot, rarity, set, hall_of_fame);
+        let db_pull = SqlitePool::connect(&std::env::var("DATABASE_URL").unwrap()).await.unwrap();
+        let mut card_base = CardBase::new(db_pull).await;
+        let card = card_base.generate_card(slot, rarity, set, hall_of_fame).await;
         // THEN
         assert!(card.is_some());
     }
 
     #[test]
-    fn generate_card_with_valid_values_then_card_is_legal() {
+    async fn generate_card_with_valid_values_then_card_is_legal() {
         // GIVEN
         let slot = CardBusterSlot::Hero;
         let rarity = CardRarity::Silver;
         let set = CardSet::KOV;
         let hall_of_fame = false;
         // WHEN
-        let card = generate_card(slot, rarity, set, hall_of_fame).unwrap();
+        let db_pull = SqlitePool::connect(&std::env::var("DATABASE_URL").unwrap()).await.unwrap();
+        let mut card_base = CardBase::new(db_pull).await;
+        let card = card_base.generate_card(slot, rarity, set, hall_of_fame).await.unwrap();
         // THEN
         assert_eq!(card.buster_slot, CardBusterSlot::Hero);
         assert_eq!(card.rarity, CardRarity::Silver);
@@ -714,59 +760,67 @@ mod tests {
 
     /// На январь 2026 в Зале Славы нет приказов
     #[test]
-    fn generate_card_with_hall_of_fame_command() {
+    async fn generate_card_with_hall_of_fame_command() {
         // GIVEN
         let slot = CardBusterSlot::Command;
         let rarity = CardRarity::Gold;
         let set = CardSet::HallOfFame;
         let hall_of_fame = true;
         // WHEN
-        let card = generate_card(slot, rarity, set, hall_of_fame);
+        let db_pull = SqlitePool::connect(&std::env::var("DATABASE_URL").unwrap()).await.unwrap();
+        let mut card_base = CardBase::new(db_pull).await;
+        let card = card_base.generate_card(slot, rarity, set, hall_of_fame).await;
         // THEN
         assert!(card.is_none());
     }
 
     /// На январь 2026 в Зале Славы все карты золотой редкости
     #[test]
-    fn generate_card_with_hall_of_fame_silver() {
+    async fn generate_card_with_hall_of_fame_silver() {
         // GIVEN
         let slot = CardBusterSlot::BasicCard;
         let rarity = CardRarity::Silver;
         let set = CardSet::HallOfFame;
         let hall_of_fame = true;
         // WHEN
-        let card = generate_card(slot, rarity, set, hall_of_fame);
+        let db_pull = SqlitePool::connect(&std::env::var("DATABASE_URL").unwrap()).await.unwrap();
+        let mut card_base = CardBase::new(db_pull).await;
+        let card = card_base.generate_card(slot, rarity, set, hall_of_fame).await;
         // THEN
         assert!(card.is_none());
     }
 
     #[test]
-    fn generate_card_with_hall_of_fame() {
+    async fn generate_card_with_hall_of_fame() {
         // GIVEN
         let slot = CardBusterSlot::BasicCard;
         let rarity = CardRarity::Gold;
         let set = CardSet::KOV;
         let hall_of_fame = true;
         // WHEN
-        let card = generate_card(slot, rarity, set, hall_of_fame).unwrap();
+        let db_pull = SqlitePool::connect(&std::env::var("DATABASE_URL").unwrap()).await.unwrap();
+        let mut card_base = CardBase::new(db_pull).await;
+        let card = card_base.generate_card(slot, rarity, set, hall_of_fame).await.unwrap();
         // THEN
         assert_eq!(card.set, CardSet::HallOfFame);
     }
 
     #[test]
-    fn generate_card_without_hall_of_fame() {
+    async fn generate_card_without_hall_of_fame() {
         // GIVEN
         let slot = CardBusterSlot::BasicCard;
         let rarity = CardRarity::Gold;
         let set = CardSet::KOV;
         let hall_of_fame = false;
         // WHEN
-        let card = generate_card(slot, rarity, set, hall_of_fame).unwrap();
+        let db_pull = SqlitePool::connect(&std::env::var("DATABASE_URL").unwrap()).await.unwrap();
+        let mut card_base = CardBase::new(db_pull).await;
+        let card = card_base.generate_card(slot, rarity, set, hall_of_fame).await.unwrap();
         // THEN
         assert_eq!(card.set, CardSet::KOV);
     }
 
-    fn standart_buster_when_given() -> [Card; BUSTER_SIZE] {
+    async fn standart_buster_when_given() -> [Card; BUSTER_SIZE] {
         // GIVEN
         let hall_of_fame_chanse = 0.5;
         let my_distribution2 = [0.5, 0.5];
@@ -785,7 +839,9 @@ mod tests {
             command_chanse3,
             basic_card_chanse,
         ).unwrap();
-        let buster = rules.generate_buster();
-        buster.unwrap()
+        let db_pull = SqlitePool::connect(&std::env::var("DATABASE_URL").unwrap()).await.unwrap();
+        let mut card_base = CardBase::new(db_pull).await;
+        let buster = card_base.generate_buster(&rules).await.unwrap();
+        buster
     }
 }

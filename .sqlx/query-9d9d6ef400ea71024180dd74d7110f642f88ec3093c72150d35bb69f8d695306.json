@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT \n            INTO cards (id, name, rarity_id, type_id, set_id, id_in_set, image_url) \n            SELECT \n                (SELECT COALESCE(MAX(id), 0) + 1 FROM cards),\n                ?,\n                (SELECT id FROM rarities WHERE name = ?),\n                (SELECT id FROM types WHERE name = ?),\n                (SELECT id FROM sets WHERE short_name = ?),\n                ?,\n                ?\n            WHERE NOT EXISTS (\n                SELECT 1 FROM cards WHERE name = ? AND set_id = (SELECT id FROM sets WHERE short_name = ?)\n            );",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 8
+    },
+    "nullable": []
+  },
+  "hash": "9d9d6ef400ea71024180dd74d7110f642f88ec3093c72150d35bb69f8d695306"
+}
